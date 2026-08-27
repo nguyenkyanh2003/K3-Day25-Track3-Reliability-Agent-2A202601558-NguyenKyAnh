@@ -1,5 +1,5 @@
 [project]
-name = "day10-reliability-agent-lab"
+name = "day25-reliability-agent-lab"
 version = "0.1.0"
 description = "Production-style skeleton for LLM agent reliability: circuit breakers, caching, metrics, and chaos testing."
 requires-python = ">=3.10"
@@ -29,6 +29,11 @@ markers = ["todo: tests that should pass after students implement TODOs"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/test_todo_requirements.py" = ["BLE001", "F401", "I001", "SIM115"]
+"tests/test_redis_cache.py" = ["BLE001"]
+"tests/test_cache.py" = ["RUF059"]
 
 [tool.mypy]
 python_version = "3.10"

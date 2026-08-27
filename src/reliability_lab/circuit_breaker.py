@@ -22,13 +22,7 @@ class CircuitOpenError(RuntimeError):
 
 @dataclass(slots=True)
 class CircuitBreaker:
-    """Circuit breaker skeleton.
-
-    TODO(student): Implement a production-safe state machine:
-    - CLOSED: calls pass through; count failures.
-    - OPEN: fail fast until reset timeout elapses.
-    - HALF_OPEN: allow a probe; close on success or re-open on failure.
-    """
+    """Thread-safe CLOSED/OPEN/HALF_OPEN circuit state machine."""
 
     name: str
     failure_threshold: int
@@ -51,17 +45,7 @@ class CircuitBreaker:
             raise ValueError("success_threshold must be greater than zero")
 
     def allow_request(self) -> bool:
-        """Return whether a request should be attempted.
-
-        TODO(student): Implement the state-based logic:
-        - CLOSED → always allow
-        - HALF_OPEN → allow (probe request)
-        - OPEN → check if reset_timeout_seconds has elapsed since opened_at
-          - If elapsed: transition to HALF_OPEN (use _transition()) and allow
-          - If not elapsed: deny (return False)
-
-        Use time.monotonic() for elapsed time comparison.
-        """
+        """Allow normal calls while CLOSED and a single recovery probe when eligible."""
         with self._lock:
             if self.state == CircuitState.CLOSED:
                 return True
@@ -84,14 +68,7 @@ class CircuitBreaker:
             return True
 
     def call(self, fn: Callable[..., T], *args: object, **kwargs: object) -> T:
-        """Call a function through the circuit breaker.
-
-        TODO(student): Implement:
-        1. Check allow_request() — if denied, raise CircuitOpenError
-        2. Try calling fn(*args, **kwargs)
-        3. On success: call record_success() and return the result
-        4. On exception: call record_failure() and re-raise
-        """
+        """Execute a callable and update circuit state from its outcome."""
         if not self.allow_request():
             raise CircuitOpenError(f"Circuit '{self.name}' is open")
 
@@ -105,15 +82,7 @@ class CircuitBreaker:
         return result
 
     def record_success(self) -> None:
-        """Record a successful call.
-
-        TODO(student): Implement:
-        1. Reset failure_count to 0
-        2. Increment success_count
-        3. If in HALF_OPEN and success_count >= success_threshold:
-           - Transition to CLOSED with reason "probe_success"
-           - Reset success_count to 0
-        """
+        """Reset failures and close a recovered circuit after enough probes."""
         with self._lock:
             self.failure_count = 0
             self.success_count += 1
@@ -128,20 +97,7 @@ class CircuitBreaker:
                 self.opened_at = None
 
     def record_failure(self) -> None:
-        """Record a failed call.
-
-        TODO(student): Implement:
-        1. Increment failure_count, reset success_count to 0
-        2. If in HALF_OPEN state:
-           - Immediately transition to OPEN with reason "probe_failure"
-           - Set opened_at = time.monotonic()
-        3. Else if failure_count >= failure_threshold:
-           - Transition to OPEN with reason "failure_threshold_reached"
-           - Set opened_at = time.monotonic()
-
-        IMPORTANT: HALF_OPEN and threshold cases need DIFFERENT reasons
-        and must be handled separately (if/elif, not combined with or).
-        """
+        """Increment failures and open or re-open the circuit when required."""
         with self._lock:
             self.failure_count += 1
             self.success_count = 0
@@ -161,6 +117,12 @@ class CircuitBreaker:
         if self.state == new_state:
             return
         self.transition_log.append(
-            {"from": self.state.value, "to": new_state.value, "reason": reason, "ts": time.time()}
+            {
+                "breaker": self.name,
+                "from": self.state.value,
+                "to": new_state.value,
+                "reason": reason,
+                "ts": time.time(),
+            }
         )
         self.state = new_state

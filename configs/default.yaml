@@ -30,7 +30,6 @@ budget:
   soft_limit_ratio: 0.8
 
 # Chaos scenarios: each overrides provider fail_rate for targeted testing.
-# TODO(student): Add more scenarios or tweak these.
 scenarios:
   - name: primary_timeout_100
     description: "Primary provider fails 100% — all traffic should fallback"

@@ -79,19 +79,7 @@ def build_gateway(config: LabConfig, provider_overrides: dict[str, float] | None
 
 
 def calculate_recovery_time_ms(gateway: ReliabilityGateway) -> float | None:
-    """Derive recovery time from circuit breaker transition logs.
-
-    TODO(student): Implement recovery time calculation:
-    1. For each breaker in gateway.breakers.values():
-       - Walk breaker.transition_log entries
-       - Track when circuit goes to "open" (save ts)
-       - Track when circuit goes to "closed" (compute delta from open ts)
-       - Recovery time = (close_ts - open_ts) * 1000 (convert to ms)
-    2. Return average of all recovery times, or None if no recovery occurred.
-
-    Each transition_log entry is a dict with keys: "from", "to", "reason", "ts"
-    where "ts" is time.time() (epoch seconds).
-    """
+    """Return mean OPEN-to-CLOSED recovery time from breaker transition logs."""
     recovery_times: list[float] = []
     for breaker in gateway.breakers.values():
         opened_at: float | None = None
@@ -107,26 +95,7 @@ def calculate_recovery_time_ms(gateway: ReliabilityGateway) -> float | None:
 
 
 def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig) -> RunMetrics:
-    """Run a single named chaos scenario.
-
-    TODO(student): Implement the scenario runner:
-    1. Build gateway with build_gateway(config, scenario.provider_overrides or None)
-    2. Create empty RunMetrics()
-    3. Loop config.load_test.requests times:
-       a. Pick random query from queries
-       b. Call gateway.complete(prompt)
-       c. Update metrics:
-          - total_requests += 1
-          - estimated_cost += result.estimated_cost
-          - If cache_hit: cache_hits += 1, estimated_cost_saved += 0.001
-          - If route == "fallback": fallback_successes += 1, successful_requests += 1
-          - If route == "static_fallback": static_fallbacks += 1, failed_requests += 1
-          - Else: successful_requests += 1
-          - If result.latency_ms > 0: append to latencies_ms
-    4. Count circuit_open_count from breaker transition logs (entries where to == "open")
-    5. Set recovery_time_ms via calculate_recovery_time_ms(gateway)
-    6. Return metrics
-    """
+    """Run one reproducible sequential or concurrent chaos scenario."""
     if not queries:
         raise ValueError("At least one query is required to run a scenario")
 
@@ -214,11 +183,7 @@ def _scenario_passed(name: str, metrics: RunMetrics) -> bool:
 
 
 def run_simulation(config: LabConfig, queries: list[str]) -> RunMetrics:
-    """Run all named scenarios from config, or a default run if none defined.
-
-    TODO(student): Add a cache vs no-cache comparison scenario.
-    Extend with your own custom scenarios (e.g., cost cap near limit).
-    """
+    """Run and aggregate all configured scenarios or a default baseline."""
     if not config.scenarios:
         default_scenario = ScenarioConfig(name="default", description="baseline run")
         metrics = run_scenario(config, queries, default_scenario)
@@ -227,8 +192,7 @@ def run_simulation(config: LabConfig, queries: list[str]) -> RunMetrics:
 
     combined = RunMetrics()
     recovery_times: list[float] = []
-    for scenario_index, scenario in enumerate(config.scenarios):
-        random.seed(config.load_test.random_seed + scenario_index)
+    for scenario in config.scenarios:
         result = run_scenario(config, queries, scenario)
 
         passed = _scenario_passed(scenario.name, result)

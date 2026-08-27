@@ -152,6 +152,7 @@ class SharedRedisCircuitBreaker:
         )
         self.transition_log.append(
             {
+                "breaker": self.name,
                 "from": old_state.value,
                 "to": new_state.value,
                 "reason": reason,

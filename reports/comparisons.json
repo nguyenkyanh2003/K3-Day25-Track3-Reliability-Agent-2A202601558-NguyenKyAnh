@@ -1,0 +1,78 @@
+{
+  "cache_comparison": {
+    "without_cache": {
+      "total_requests": 40,
+      "availability": 1.0,
+      "error_rate": 0.0,
+      "latency_p50_ms": 206.31,
+      "latency_p95_ms": 234.57,
+      "latency_p99_ms": 239.43,
+      "fallback_success_rate": 0.0,
+      "cache_hit_rate": 0.0,
+      "circuit_open_count": 0,
+      "recovery_time_ms": null,
+      "estimated_cost": 0.02414,
+      "estimated_cost_saved": 0.0,
+      "duration_ms": 2156.85,
+      "throughput_rps": 18.55,
+      "scenarios": {},
+      "scenario_metrics": {}
+    },
+    "with_cache": {
+      "total_requests": 40,
+      "availability": 1.0,
+      "error_rate": 0.0,
+      "latency_p50_ms": 204.65,
+      "latency_p95_ms": 234.16,
+      "latency_p99_ms": 236.56,
+      "fallback_success_rate": 0.0,
+      "cache_hit_rate": 0.425,
+      "circuit_open_count": 0,
+      "recovery_time_ms": null,
+      "estimated_cost": 0.01356,
+      "estimated_cost_saved": 0.017,
+      "duration_ms": 1295.79,
+      "throughput_rps": 30.87,
+      "scenarios": {},
+      "scenario_metrics": {}
+    }
+  },
+  "concurrency_comparison": {
+    "sequential": {
+      "total_requests": 40,
+      "availability": 1.0,
+      "error_rate": 0.0,
+      "latency_p50_ms": 206.21,
+      "latency_p95_ms": 234.74,
+      "latency_p99_ms": 239.48,
+      "fallback_success_rate": 0.0,
+      "cache_hit_rate": 0.0,
+      "circuit_open_count": 0,
+      "recovery_time_ms": null,
+      "estimated_cost": 0.02414,
+      "estimated_cost_saved": 0.0,
+      "duration_ms": 8390.27,
+      "throughput_rps": 4.77,
+      "scenarios": {},
+      "scenario_metrics": {}
+    },
+    "concurrent": {
+      "total_requests": 40,
+      "availability": 1.0,
+      "error_rate": 0.0,
+      "latency_p50_ms": 206.45,
+      "latency_p95_ms": 234.47,
+      "latency_p99_ms": 239.66,
+      "fallback_success_rate": 0.0,
+      "cache_hit_rate": 0.0,
+      "circuit_open_count": 0,
+      "recovery_time_ms": null,
+      "estimated_cost": 0.02414,
+      "estimated_cost_saved": 0.0,
+      "duration_ms": 2159.82,
+      "throughput_rps": 18.52,
+      "scenarios": {},
+      "scenario_metrics": {}
+    }
+  }
+}

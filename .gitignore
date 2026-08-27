@@ -1,9 +1,9 @@
 .venv/
 __pycache__/
 .pytest_cache/
+.coverage
 .ruff_cache/
 .mypy_cache/
 *.pyc
-reports/metrics.json
-reports/metrics.csv
-reports/final_report.md
+*.egg-info/
+.DS_Store
