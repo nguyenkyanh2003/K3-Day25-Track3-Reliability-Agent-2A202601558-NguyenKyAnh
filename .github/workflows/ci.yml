@@ -20,6 +20,13 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -e ".[dev]"
-      - run: ruff check src tests scripts
-      - run: mypy src scripts
-      - run: pytest -q --cov=reliability_lab --cov-report=term-missing
+      - run: python scripts/run_quality_checks.py --out reports/quality.json
+      - run: pytest -q --cov=reliability_lab --cov-fail-under=95 --cov-report=term-missing --cov-report=xml:reports/coverage.xml --junitxml=reports/junit.xml
+      - run: python scripts/run_chaos.py --config configs/default.yaml --out reports/metrics.json
+      - run: python scripts/run_comparisons.py --config configs/default.yaml --out reports/comparisons.json
+      - run: python scripts/verify_redis_shared.py --out reports/redis_evidence.json
+      - run: python scripts/generate_report.py --metrics reports/metrics.json --comparisons reports/comparisons.json --junit reports/junit.xml --coverage reports/coverage.xml --redis-evidence reports/redis_evidence.json --quality-evidence reports/quality.json --out reports/final_report.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reliability-evidence
+          path: reports/

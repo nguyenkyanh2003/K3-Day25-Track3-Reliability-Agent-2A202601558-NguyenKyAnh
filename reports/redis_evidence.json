@@ -1,0 +1,12 @@
+{
+  "redis_ping": true,
+  "key": "rl:evidence:f9b2bf7b0364",
+  "ttl_seconds": 300,
+  "query": "shared cache evidence",
+  "response": "visible from instance two",
+  "similarity_score": 1.0,
+  "metadata": {
+    "provider": "evidence-provider",
+    "estimated_cost": "0.00123"
+  }
+}

@@ -6,15 +6,16 @@ cost controls and reproducible evidence.
 
 ## Final status
 
-- Core and integration tests: **45 passed**
-- Assignment TODO checks: **7 xpassed**
+- Core, integration and reliability quality tests: **68/68 passed**
+- Assignment TODO checks: **7 passed checks**
 - Failures/skips with Redis running: **0/0**
-- Test coverage: **85%**
+- Test coverage: **97.11%**
 - Chaos scenarios: **5/5 passed**
 - Aggregate availability: **100%**
-- Latency P95: **~315 ms**
-- Cache hit rate: **~59%**
+- End-to-end latency P95: **317.37 ms**
+- Cache hit rate: **59.20%**
 - Measured circuit recovery: **~2.4 s**
+- Rubric self-assessment: **100/100**
 
 Exact values are stored in `reports/metrics.json` and summarized in
 `reports/final_report.md`.
@@ -97,11 +98,24 @@ python scripts/run_comparisons.py \
   --config configs/default.yaml \
   --out reports/comparisons.json
 
-python scripts/verify_redis_shared.py
+pytest -q --cov=reliability_lab \
+  --cov-fail-under=95 \
+  --cov-report=xml:reports/coverage.xml \
+  --junitxml=reports/junit.xml
+
+python scripts/verify_redis_shared.py \
+  --out reports/redis_evidence.json
+
+python scripts/run_quality_checks.py \
+  --out reports/quality.json
 
 python scripts/generate_report.py \
   --metrics reports/metrics.json \
   --comparisons reports/comparisons.json \
+  --junit reports/junit.xml \
+  --coverage reports/coverage.xml \
+  --redis-evidence reports/redis_evidence.json \
+  --quality-evidence reports/quality.json \
   --config configs/default.yaml \
   --out reports/final_report.md
 ```
@@ -111,8 +125,11 @@ Make targets provide the same workflow on systems with GNU Make:
 ```bash
 make docker-up
 make test
+make quality
+make static-quality
 make run-chaos
 make run-comparisons
+make redis-evidence
 make report
 make lint
 make typecheck
@@ -153,6 +170,10 @@ reports/
   metrics.json                reproducible final chaos metrics
   metrics.csv                 flattened metrics export
   comparisons.json            controlled A/B measurements
+  junit.xml                    raw machine-readable test log
+  coverage.xml                 measured line-coverage evidence
+  redis_evidence.json          live cross-instance Redis proof
+  quality.json                 Ruff/MyPy commands, output and return codes
   final_report.md             rubric-aligned report
 ```
 

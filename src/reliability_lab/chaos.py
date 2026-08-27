@@ -107,11 +107,17 @@ def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig
     prompts = [query_random.choice(queries) for _ in range(config.load_test.requests)]
 
     try:
-        def execute(batch: list[str]) -> list[GatewayResponse]:
+        def invoke(prompt: str) -> tuple[GatewayResponse, float]:
+            request_started_at = time.perf_counter()
+            response = gateway.complete(prompt)
+            elapsed_ms = (time.perf_counter() - request_started_at) * 1000
+            return response, elapsed_ms
+
+        def execute(batch: list[str]) -> list[tuple[GatewayResponse, float]]:
             if config.load_test.concurrency == 1:
-                return [gateway.complete(prompt) for prompt in batch]
+                return [invoke(prompt) for prompt in batch]
             with ThreadPoolExecutor(max_workers=config.load_test.concurrency) as executor:
-                return list(executor.map(gateway.complete, batch))
+                return list(executor.map(invoke, batch))
 
         started_at = time.perf_counter()
         recovery_point = scenario.recover_after_requests
@@ -126,15 +132,30 @@ def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig
             results = execute(prompts)
         metrics.duration_ms = (time.perf_counter() - started_at) * 1000
 
-        for result in results:
+        primary_name = gateway.providers[0].name if gateway.providers else None
+        for result, request_latency_ms in results:
             metrics.total_requests += 1
             metrics.estimated_cost += result.estimated_cost
+            metrics.estimated_cost_saved += result.estimated_cost_saved
+            metrics.latencies_ms.append(request_latency_ms)
+
+            metrics.provider_attempts += len(result.attempted_providers)
+            metrics.primary_attempts += sum(
+                provider_name == primary_name
+                for provider_name in result.attempted_providers
+            )
+            metrics.fallback_attempts += sum(
+                provider_name != primary_name
+                for provider_name in result.attempted_providers
+            )
 
             if result.cache_hit:
                 metrics.cache_hits += 1
-                metrics.estimated_cost_saved += 0.001
 
-            if result.route == "fallback":
+            if result.route == "primary":
+                metrics.primary_successes += 1
+                metrics.successful_requests += 1
+            elif result.route == "fallback":
                 metrics.fallback_successes += 1
                 metrics.successful_requests += 1
             elif result.route == "static_fallback":
@@ -144,10 +165,15 @@ def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig
                 metrics.successful_requests += 1
 
             if result.latency_ms > 0:
-                metrics.latencies_ms.append(result.latency_ms)
+                metrics.provider_latencies_ms.append(result.latency_ms)
 
         metrics.circuit_open_count = sum(
             transition["to"] == "open"
+            for breaker in gateway.breakers.values()
+            for transition in breaker.transition_log
+        )
+        metrics.circuit_close_count = sum(
+            transition["to"] == "closed"
             for breaker in gateway.breakers.values()
             for transition in breaker.transition_log
         )
@@ -167,18 +193,43 @@ def _scenario_passed(name: str, metrics: RunMetrics) -> bool:
     """Evaluate a scenario against the behavior it is intended to prove."""
     if name == "primary_timeout_100":
         return (
-            metrics.availability >= 0.95
+            metrics.availability >= 0.99
+            and metrics.primary_attempts > 0
+            and metrics.primary_successes == 0
+            and metrics.fallback_successes > 0
+            and metrics.circuit_open_count > 0
+            and metrics.static_fallbacks == 0
+        )
+    if name == "all_healthy":
+        return (
+            metrics.availability == 1.0
+            and metrics.primary_successes > 0
+            and metrics.fallback_successes == 0
+            and metrics.static_fallbacks == 0
+            and metrics.circuit_open_count == 0
+        )
+    if name == "primary_flaky_50":
+        return (
+            metrics.availability >= 0.99
+            and metrics.primary_successes > 0
             and metrics.fallback_successes > 0
             and metrics.circuit_open_count > 0
         )
-    if name == "all_healthy":
-        return metrics.availability == 1.0 and metrics.circuit_open_count == 0
-    if name == "primary_flaky_50":
-        return metrics.availability >= 0.95 and metrics.successful_requests > 0
     if name == "primary_degraded_80":
-        return metrics.availability >= 0.90 and metrics.fallback_successes > 0
+        return (
+            metrics.availability >= 0.99
+            and metrics.fallback_successes > 0
+            and metrics.circuit_open_count > 0
+        )
     if name == "primary_recovers":
-        return metrics.availability >= 0.99 and metrics.recovery_time_ms is not None
+        return (
+            metrics.availability >= 0.99
+            and metrics.recovery_time_ms is not None
+            and metrics.circuit_open_count > 0
+            and metrics.circuit_close_count > 0
+            and metrics.primary_successes > 0
+            and metrics.fallback_successes > 0
+        )
     return metrics.availability >= 0.95
 
 
@@ -202,14 +253,20 @@ def run_simulation(config: LabConfig, queries: list[str]) -> RunMetrics:
         combined.total_requests += result.total_requests
         combined.successful_requests += result.successful_requests
         combined.failed_requests += result.failed_requests
+        combined.provider_attempts += result.provider_attempts
+        combined.primary_attempts += result.primary_attempts
+        combined.fallback_attempts += result.fallback_attempts
+        combined.primary_successes += result.primary_successes
         combined.fallback_successes += result.fallback_successes
         combined.static_fallbacks += result.static_fallbacks
         combined.cache_hits += result.cache_hits
         combined.circuit_open_count += result.circuit_open_count
+        combined.circuit_close_count += result.circuit_close_count
         combined.estimated_cost += result.estimated_cost
         combined.estimated_cost_saved += result.estimated_cost_saved
         combined.duration_ms += result.duration_ms
         combined.latencies_ms.extend(result.latencies_ms)
+        combined.provider_latencies_ms.extend(result.provider_latencies_ms)
         if result.recovery_time_ms is not None:
             recovery_times.append(result.recovery_time_ms)
 

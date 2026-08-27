@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 import time
@@ -46,6 +47,13 @@ class CacheEntry:
     metadata: dict[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class CacheLookup:
+    value: str | None
+    score: float
+    metadata: dict[str, str]
+
+
 class ResponseCache:
     """Thread-safe in-memory response cache with privacy and false-hit guards."""
 
@@ -63,8 +71,13 @@ class ResponseCache:
 
     def get(self, query: str) -> tuple[str | None, float]:
         """Return the best unexpired guarded similarity match and its score."""
+        lookup = self.lookup(query)
+        return lookup.value, lookup.score
+
+    def lookup(self, query: str) -> CacheLookup:
+        """Return a cache match with metadata used for cost accounting."""
         if _is_uncacheable(query):
-            return None, 0.0
+            return CacheLookup(None, 0.0, {})
 
         now = time.time()
         with self._lock:
@@ -83,7 +96,7 @@ class ResponseCache:
                     best_score = score
 
             if best_entry is None or best_score < self.similarity_threshold:
-                return None, best_score
+                return CacheLookup(None, best_score, {})
 
             if _looks_like_false_hit(query, best_entry.key):
                 self.false_hit_log.append(
@@ -95,9 +108,9 @@ class ResponseCache:
                         "ts": now,
                     }
                 )
-                return None, best_score
+                return CacheLookup(None, best_score, {})
 
-            return best_entry.value, best_score
+            return CacheLookup(best_entry.value, best_score, dict(best_entry.metadata))
 
     def set(self, query: str, value: str, metadata: dict[str, str] | None = None) -> None:
         """Store a response unless the query contains sensitive data."""
@@ -180,39 +193,52 @@ class SharedRedisCache:
 
     def get(self, query: str) -> tuple[str | None, float]:
         """Return an exact or guarded similarity match from Redis."""
+        lookup = self.lookup(query)
+        return lookup.value, lookup.score
+
+    def lookup(self, query: str) -> CacheLookup:
+        """Return a Redis cache match and persisted cost/provider metadata."""
         if _is_uncacheable(query):
-            return None, 0.0
+            return CacheLookup(None, 0.0, {})
 
         exact_key = f"{self.prefix}{self._query_hash(query)}"
         try:
             exact_response = self._redis.hget(exact_key, "response")
             if exact_response is not None:
-                return str(exact_response), 1.0
+                metadata = self._decode_metadata(self._redis.hget(exact_key, "metadata"))
+                return CacheLookup(str(exact_response), 1.0, metadata)
 
             best_query: str | None = None
             best_response: str | None = None
+            best_metadata: dict[str, str] = {}
             best_score = 0.0
-            for key in self._redis.scan_iter(f"{self.prefix}*"):
-                cached_query = self._redis.hget(key, "query")
+            keys = list(self._redis.scan_iter(f"{self.prefix}*"))
+            with self._redis.pipeline(transaction=False) as pipeline:
+                for key in keys:
+                    pipeline.hgetall(key)
+                cached_entries = pipeline.execute()
+            for cached_entry in cached_entries:
+                cached_query = cached_entry.get("query")
                 if cached_query is None:
                     continue
                 score = ResponseCache.similarity(query, str(cached_query))
                 if score > best_score:
                     best_query = str(cached_query)
-                    cached_response = self._redis.hget(key, "response")
+                    cached_response = cached_entry.get("response")
                     best_response = (
                         str(cached_response) if cached_response is not None else None
                     )
+                    best_metadata = self._decode_metadata(cached_entry.get("metadata"))
                     best_score = score
         except RedisError:
-            return self._fallback.get(query)
+            return self._fallback.lookup(query)
 
         if (
             best_query is None
             or best_response is None
             or best_score < self.similarity_threshold
         ):
-            return None, best_score
+            return CacheLookup(None, best_score, {})
 
         if _looks_like_false_hit(query, best_query):
             self.false_hit_log.append(
@@ -224,9 +250,9 @@ class SharedRedisCache:
                     "ts": time.time(),
                 }
             )
-            return None, best_score
+            return CacheLookup(None, best_score, {})
 
-        return best_response, best_score
+        return CacheLookup(best_response, best_score, best_metadata)
 
     def set(self, query: str, value: str, metadata: dict[str, str] | None = None) -> None:
         """Store a guarded response in Redis and the local fallback with TTL."""
@@ -237,7 +263,14 @@ class SharedRedisCache:
         key = f"{self.prefix}{self._query_hash(query)}"
         try:
             with self._redis.pipeline(transaction=True) as pipeline:
-                pipeline.hset(key, mapping={"query": query, "response": value})
+                pipeline.hset(
+                    key,
+                    mapping={
+                        "query": query,
+                        "response": value,
+                        "metadata": json.dumps(metadata or {}, ensure_ascii=False),
+                    },
+                )
                 pipeline.expire(key, self.ttl_seconds)
                 pipeline.execute()
         except RedisError:
@@ -265,3 +298,15 @@ class SharedRedisCache:
     def _query_hash(query: str) -> str:
         """Deterministic short hash for a query string."""
         return hashlib.md5(query.lower().strip().encode()).hexdigest()[:12]
+
+    @staticmethod
+    def _decode_metadata(raw: object) -> dict[str, str]:
+        if not isinstance(raw, str):
+            return {}
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        return {str(key): str(item) for key, item in value.items()}

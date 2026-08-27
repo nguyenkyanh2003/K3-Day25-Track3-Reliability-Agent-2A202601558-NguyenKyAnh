@@ -13,15 +13,21 @@ class RunMetrics(BaseModel):
     total_requests: int = 0
     successful_requests: int = 0
     failed_requests: int = 0
+    provider_attempts: int = 0
+    primary_attempts: int = 0
+    fallback_attempts: int = 0
+    primary_successes: int = 0
     fallback_successes: int = 0
     static_fallbacks: int = 0
     cache_hits: int = 0
     circuit_open_count: int = 0
+    circuit_close_count: int = 0
     recovery_time_ms: float | None = None
     estimated_cost: float = 0.0
     estimated_cost_saved: float = 0.0
     duration_ms: float = 0.0
     latencies_ms: list[float] = Field(default_factory=list)
+    provider_latencies_ms: list[float] = Field(default_factory=list)
     scenarios: dict[str, str] = Field(default_factory=dict)
     scenario_metrics: dict[str, dict[str, object]] = Field(default_factory=dict)
 
@@ -50,17 +56,33 @@ class RunMetrics(BaseModel):
     def percentile(self, q: float) -> float:
         return percentile(self.latencies_ms, q)
 
+    def provider_percentile(self, q: float) -> float:
+        return percentile(self.provider_latencies_ms, q)
+
     def to_report_dict(self) -> dict[str, object]:
         return {
             "total_requests": self.total_requests,
+            "successful_requests": self.successful_requests,
+            "failed_requests": self.failed_requests,
             "availability": round(self.availability, 4),
             "error_rate": round(self.error_rate, 4),
+            "provider_attempts": self.provider_attempts,
+            "primary_attempts": self.primary_attempts,
+            "fallback_attempts": self.fallback_attempts,
+            "primary_successes": self.primary_successes,
+            "fallback_successes": self.fallback_successes,
+            "static_fallbacks": self.static_fallbacks,
+            "cache_hits": self.cache_hits,
             "latency_p50_ms": round(self.percentile(50), 2),
             "latency_p95_ms": round(self.percentile(95), 2),
             "latency_p99_ms": round(self.percentile(99), 2),
+            "provider_latency_p50_ms": round(self.provider_percentile(50), 2),
+            "provider_latency_p95_ms": round(self.provider_percentile(95), 2),
+            "provider_latency_p99_ms": round(self.provider_percentile(99), 2),
             "fallback_success_rate": round(self.fallback_success_rate, 4),
             "cache_hit_rate": round(self.cache_hit_rate, 4),
             "circuit_open_count": self.circuit_open_count,
+            "circuit_close_count": self.circuit_close_count,
             "recovery_time_ms": self.recovery_time_ms,
             "estimated_cost": round(self.estimated_cost, 6),
             "estimated_cost_saved": round(self.estimated_cost_saved, 6),

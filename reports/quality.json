@@ -1,0 +1,12 @@
+{
+  "ruff": {
+    "command": "python -m ruff check --no-cache src tests scripts",
+    "returncode": 0,
+    "output": "All checks passed!"
+  },
+  "mypy": {
+    "command": "python -m mypy --no-incremental src scripts",
+    "returncode": 0,
+    "output": "Success: no issues found in 14 source files"
+  }
+}

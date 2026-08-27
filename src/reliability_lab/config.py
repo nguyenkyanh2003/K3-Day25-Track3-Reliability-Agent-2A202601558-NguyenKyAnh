@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -18,13 +18,13 @@ class CircuitBreakerConfig(BaseModel):
     failure_threshold: int = Field(gt=0)
     reset_timeout_seconds: float = Field(gt=0)
     success_threshold: int = Field(gt=0)
-    backend: str = "memory"
+    backend: Literal["memory", "redis"] = "memory"
     redis_url: str = "redis://localhost:6379/0"
 
 
 class CacheConfig(BaseModel):
     enabled: bool = True
-    backend: str = "memory"  # "memory" or "redis"
+    backend: Literal["memory", "redis"] = "memory"
     ttl_seconds: int = Field(gt=0)
     similarity_threshold: float = Field(ge=0.0, le=1.0)
     redis_url: str = "redis://localhost:6379/0"
