@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass
+from threading import RLock
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -50,9 +53,16 @@ class ResponseCache:
     """
 
     def __init__(self, ttl_seconds: int, similarity_threshold: float):
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be greater than zero")
+        if not 0.0 <= similarity_threshold <= 1.0:
+            raise ValueError("similarity_threshold must be between zero and one")
+
         self.ttl_seconds = ttl_seconds
         self.similarity_threshold = similarity_threshold
         self._entries: list[CacheEntry] = []
+        self.false_hit_log: list[dict[str, object]] = []
+        self._lock = RLock()
 
     def get(self, query: str) -> tuple[str | None, float]:
         """Look up a cached response by semantic similarity.
@@ -70,7 +80,41 @@ class ResponseCache:
         You'll need a self.false_hit_log: list[dict[str, object]] attribute
         (add it in __init__).
         """
-        raise NotImplementedError("TODO: implement get()")
+        if _is_uncacheable(query):
+            return None, 0.0
+
+        now = time.time()
+        with self._lock:
+            self._entries = [
+                entry
+                for entry in self._entries
+                if now - entry.created_at <= self.ttl_seconds
+            ]
+
+            best_entry: CacheEntry | None = None
+            best_score = 0.0
+            for entry in self._entries:
+                score = self.similarity(query, entry.key)
+                if score > best_score:
+                    best_entry = entry
+                    best_score = score
+
+            if best_entry is None or best_score < self.similarity_threshold:
+                return None, best_score
+
+            if _looks_like_false_hit(query, best_entry.key):
+                self.false_hit_log.append(
+                    {
+                        "query": query,
+                        "cached_key": best_entry.key,
+                        "score": best_score,
+                        "reason": "date_or_number_mismatch",
+                        "ts": now,
+                    }
+                )
+                return None, best_score
+
+            return best_entry.value, best_score
 
     def set(self, query: str, value: str, metadata: dict[str, str] | None = None) -> None:
         """Store a response in cache.
@@ -79,7 +123,17 @@ class ResponseCache:
         1. Return immediately if _is_uncacheable(query)
         2. Append a CacheEntry to self._entries
         """
-        raise NotImplementedError("TODO: implement set()")
+        if _is_uncacheable(query):
+            return
+
+        entry = CacheEntry(
+            key=query,
+            value=value,
+            created_at=time.time(),
+            metadata=dict(metadata or {}),
+        )
+        with self._lock:
+            self._entries.append(entry)
 
     @staticmethod
     def similarity(a: str, b: str) -> float:
@@ -98,7 +152,28 @@ class ResponseCache:
         Hint: Use collections.Counter and math.sqrt.
         Import them at the top of the file.
         """
-        raise NotImplementedError("TODO: implement similarity()")
+        if a == b:
+            return 1.0
+
+        def tokenize(text: str) -> list[str]:
+            words = re.findall(r"\w+", text.casefold())
+            tokens = list(words)
+            for word in words:
+                tokens.extend(word[index : index + 3] for index in range(len(word) - 2))
+            return tokens
+
+        vector_a = Counter(tokenize(a))
+        vector_b = Counter(tokenize(b))
+        if not vector_a or not vector_b:
+            return 0.0
+
+        dot_product = sum(
+            count * vector_b.get(token, 0) for token, count in vector_a.items()
+        )
+        magnitude_a = math.sqrt(sum(count * count for count in vector_a.values()))
+        magnitude_b = math.sqrt(sum(count * count for count in vector_b.values()))
+        denominator = magnitude_a * magnitude_b
+        return dot_product / denominator if denominator else 0.0
 
 
 # ---------------------------------------------------------------------------
