@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import csv
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from statistics import median
-from typing import Iterable
 
 from pydantic import BaseModel, Field
 
@@ -21,6 +22,7 @@ class RunMetrics(BaseModel):
     estimated_cost_saved: float = 0.0
     latencies_ms: list[float] = Field(default_factory=list)
     scenarios: dict[str, str] = Field(default_factory=dict)
+    scenario_metrics: dict[str, dict[str, object]] = Field(default_factory=dict)
 
     @property
     def availability(self) -> float:
@@ -57,11 +59,15 @@ class RunMetrics(BaseModel):
             "estimated_cost": round(self.estimated_cost, 6),
             "estimated_cost_saved": round(self.estimated_cost_saved, 6),
             "scenarios": self.scenarios,
+            "scenario_metrics": self.scenario_metrics,
         }
 
     def write_json(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(json.dumps(self.to_report_dict(), indent=2, ensure_ascii=False))
+        Path(path).write_text(
+            json.dumps(self.to_report_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     def write_csv(self, path: str | Path) -> None:
         """Export metrics to CSV format.
@@ -72,7 +78,20 @@ class RunMetrics(BaseModel):
         3. Write a single-row CSV with csv.DictWriter (import csv at top of file)
         4. Create parent directories if needed
         """
-        raise NotImplementedError("TODO: implement write_csv()")
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        report = self.to_report_dict()
+        scenarios = report.pop("scenarios")
+        scenario_metrics = report.pop("scenario_metrics")
+        if isinstance(scenarios, dict):
+            report.update({f"scenario_{name}": status for name, status in scenarios.items()})
+        report["scenario_metrics_json"] = json.dumps(scenario_metrics, ensure_ascii=False)
+
+        with destination.open("w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=report.keys())
+            writer.writeheader()
+            writer.writerow(report)
 
 
 def percentile(values: Iterable[float], q: float) -> float:

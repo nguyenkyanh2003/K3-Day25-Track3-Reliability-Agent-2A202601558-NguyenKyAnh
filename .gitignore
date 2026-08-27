@@ -5,4 +5,5 @@ __pycache__/
 .mypy_cache/
 *.pyc
 reports/metrics.json
+reports/metrics.csv
 reports/final_report.md

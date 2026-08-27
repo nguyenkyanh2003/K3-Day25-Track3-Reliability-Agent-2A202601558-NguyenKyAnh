@@ -19,6 +19,7 @@ cache:
   redis_url: "redis://localhost:6379/0"
 load_test:
   requests: 100
+  random_seed: 42
 
 # Chaos scenarios: each overrides provider fail_rate for targeted testing.
 # TODO(student): Add more scenarios or tweak these.
@@ -33,4 +34,11 @@ scenarios:
       primary: 0.5
   - name: all_healthy
     description: "Baseline — both providers healthy"
-    provider_overrides: {}
+    provider_overrides:
+      primary: 0.0
+      backup: 0.0
+  - name: primary_degraded_80
+    description: "Primary fails 80% — backup should preserve availability"
+    provider_overrides:
+      primary: 0.8
+      backup: 0.1
