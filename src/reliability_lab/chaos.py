@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import json
 import random
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from reliability_lab.cache import ResponseCache, SharedRedisCache
 from reliability_lab.circuit_breaker import CircuitBreaker
 from reliability_lab.config import LabConfig, ScenarioConfig
-from reliability_lab.gateway import ReliabilityGateway
+from reliability_lab.gateway import GatewayResponse, ReliabilityGateway
 from reliability_lab.metrics import RunMetrics
 from reliability_lab.providers import FakeLLMProvider
+from reliability_lab.redis_circuit_breaker import SharedRedisCircuitBreaker
 
 
 def load_queries(path: str | Path = "data/sample_queries.jsonl") -> list[str]:
@@ -23,18 +26,39 @@ def load_queries(path: str | Path = "data/sample_queries.jsonl") -> list[str]:
 
 def build_gateway(config: LabConfig, provider_overrides: dict[str, float] | None = None) -> ReliabilityGateway:
     providers = []
-    for p in config.providers:
+    for provider_index, p in enumerate(config.providers):
         fail_rate = provider_overrides.get(p.name, p.fail_rate) if provider_overrides else p.fail_rate
-        providers.append(FakeLLMProvider(p.name, fail_rate, p.base_latency_ms, p.cost_per_1k_tokens))
-    breakers = {
-        p.name: CircuitBreaker(
-            name=p.name,
-            failure_threshold=config.circuit_breaker.failure_threshold,
-            reset_timeout_seconds=config.circuit_breaker.reset_timeout_seconds,
-            success_threshold=config.circuit_breaker.success_threshold,
+        providers.append(
+            FakeLLMProvider(
+                p.name,
+                fail_rate,
+                p.base_latency_ms,
+                p.cost_per_1k_tokens,
+                random_seed=config.load_test.random_seed + provider_index,
+            )
         )
-        for p in config.providers
-    }
+    breakers: dict[str, CircuitBreaker | SharedRedisCircuitBreaker]
+    if config.circuit_breaker.backend == "redis":
+        breakers = {
+            p.name: SharedRedisCircuitBreaker(
+                name=p.name,
+                failure_threshold=config.circuit_breaker.failure_threshold,
+                reset_timeout_seconds=config.circuit_breaker.reset_timeout_seconds,
+                success_threshold=config.circuit_breaker.success_threshold,
+                redis_url=config.circuit_breaker.redis_url,
+            )
+            for p in config.providers
+        }
+    else:
+        breakers = {
+            p.name: CircuitBreaker(
+                name=p.name,
+                failure_threshold=config.circuit_breaker.failure_threshold,
+                reset_timeout_seconds=config.circuit_breaker.reset_timeout_seconds,
+                success_threshold=config.circuit_breaker.success_threshold,
+            )
+            for p in config.providers
+        }
     cache: ResponseCache | SharedRedisCache | None = None
     if config.cache.enabled:
         if config.cache.backend == "redis":
@@ -45,7 +69,13 @@ def build_gateway(config: LabConfig, provider_overrides: dict[str, float] | None
             )
         else:
             cache = ResponseCache(config.cache.ttl_seconds, config.cache.similarity_threshold)
-    return ReliabilityGateway(providers, breakers, cache)
+    return ReliabilityGateway(
+        providers,
+        breakers,
+        cache,
+        max_cost=config.budget.max_cost if config.budget.enabled else None,
+        soft_limit_ratio=config.budget.soft_limit_ratio,
+    )
 
 
 def calculate_recovery_time_ms(gateway: ReliabilityGateway) -> float | None:
@@ -103,9 +133,31 @@ def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig
     gateway = build_gateway(config, scenario.provider_overrides or None)
     metrics = RunMetrics()
 
+    scenario_seed = config.load_test.random_seed + sum(map(ord, scenario.name))
+    query_random = random.Random(scenario_seed)
+    prompts = [query_random.choice(queries) for _ in range(config.load_test.requests)]
+
     try:
-        for _ in range(config.load_test.requests):
-            result = gateway.complete(random.choice(queries))
+        def execute(batch: list[str]) -> list[GatewayResponse]:
+            if config.load_test.concurrency == 1:
+                return [gateway.complete(prompt) for prompt in batch]
+            with ThreadPoolExecutor(max_workers=config.load_test.concurrency) as executor:
+                return list(executor.map(gateway.complete, batch))
+
+        started_at = time.perf_counter()
+        recovery_point = scenario.recover_after_requests
+        if recovery_point is not None and recovery_point < len(prompts):
+            results = execute(prompts[:recovery_point])
+            for provider in gateway.providers:
+                if provider.name in scenario.recovered_provider_overrides:
+                    provider.fail_rate = scenario.recovered_provider_overrides[provider.name]
+            time.sleep(config.circuit_breaker.reset_timeout_seconds + 0.05)
+            results.extend(execute(prompts[recovery_point:]))
+        else:
+            results = execute(prompts)
+        metrics.duration_ms = (time.perf_counter() - started_at) * 1000
+
+        for result in results:
             metrics.total_requests += 1
             metrics.estimated_cost += result.estimated_cost
 
@@ -136,6 +188,10 @@ def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig
         close_cache = getattr(gateway.cache, "close", None)
         if callable(close_cache):
             close_cache()
+        for breaker in gateway.breakers.values():
+            close_breaker = getattr(breaker, "close", None)
+            if callable(close_breaker):
+                close_breaker()
 
 
 def _scenario_passed(name: str, metrics: RunMetrics) -> bool:
@@ -152,6 +208,8 @@ def _scenario_passed(name: str, metrics: RunMetrics) -> bool:
         return metrics.availability >= 0.95 and metrics.successful_requests > 0
     if name == "primary_degraded_80":
         return metrics.availability >= 0.90 and metrics.fallback_successes > 0
+    if name == "primary_recovers":
+        return metrics.availability >= 0.99 and metrics.recovery_time_ms is not None
     return metrics.availability >= 0.95
 
 
@@ -186,6 +244,7 @@ def run_simulation(config: LabConfig, queries: list[str]) -> RunMetrics:
         combined.circuit_open_count += result.circuit_open_count
         combined.estimated_cost += result.estimated_cost
         combined.estimated_cost_saved += result.estimated_cost_saved
+        combined.duration_ms += result.duration_ms
         combined.latencies_ms.extend(result.latencies_ms)
         if result.recovery_time_ms is not None:
             recovery_times.append(result.recovery_time_ms)

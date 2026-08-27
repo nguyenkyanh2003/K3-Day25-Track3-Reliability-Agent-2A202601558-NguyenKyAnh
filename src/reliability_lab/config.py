@@ -18,6 +18,8 @@ class CircuitBreakerConfig(BaseModel):
     failure_threshold: int = Field(gt=0)
     reset_timeout_seconds: float = Field(gt=0)
     success_threshold: int = Field(gt=0)
+    backend: str = "memory"
+    redis_url: str = "redis://localhost:6379/0"
 
 
 class CacheConfig(BaseModel):
@@ -31,12 +33,21 @@ class CacheConfig(BaseModel):
 class LoadTestConfig(BaseModel):
     requests: int = Field(gt=0)
     random_seed: int = 42
+    concurrency: int = Field(default=1, gt=0)
+
+
+class BudgetConfig(BaseModel):
+    enabled: bool = False
+    max_cost: float = Field(default=0.05, gt=0.0)
+    soft_limit_ratio: float = Field(default=0.8, gt=0.0, lt=1.0)
 
 
 class ScenarioConfig(BaseModel):
     name: str
     description: str = ""
     provider_overrides: dict[str, float] = Field(default_factory=dict)
+    recover_after_requests: int | None = Field(default=None, gt=0)
+    recovered_provider_overrides: dict[str, float] = Field(default_factory=dict)
 
 
 class LabConfig(BaseModel):
@@ -44,6 +55,7 @@ class LabConfig(BaseModel):
     circuit_breaker: CircuitBreakerConfig
     cache: CacheConfig
     load_test: LoadTestConfig
+    budget: BudgetConfig = Field(default_factory=BudgetConfig)
     scenarios: list[ScenarioConfig] = Field(default_factory=list)
 
 

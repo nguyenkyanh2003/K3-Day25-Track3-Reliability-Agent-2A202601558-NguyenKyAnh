@@ -4,13 +4,15 @@ providers:
     base_latency_ms: 180
     cost_per_1k_tokens: 0.01
   - name: backup
-    fail_rate: 0.05
+    fail_rate: 0.01
     base_latency_ms: 260
     cost_per_1k_tokens: 0.006
 circuit_breaker:
   failure_threshold: 3
-  reset_timeout_seconds: 2
+  reset_timeout_seconds: 1
   success_threshold: 1
+  backend: memory
+  redis_url: "redis://localhost:6379/0"
 cache:
   enabled: true
   backend: memory          # "memory" (default) or "redis" (requires docker compose up -d)
@@ -20,6 +22,12 @@ cache:
 load_test:
   requests: 100
   random_seed: 42
+  concurrency: 4
+
+budget:
+  enabled: false
+  max_cost: 0.05
+  soft_limit_ratio: 0.8
 
 # Chaos scenarios: each overrides provider fail_rate for targeted testing.
 # TODO(student): Add more scenarios or tweak these.
@@ -41,4 +49,13 @@ scenarios:
     description: "Primary fails 80% — backup should preserve availability"
     provider_overrides:
       primary: 0.8
-      backup: 0.1
+      backup: 0.02
+  - name: primary_recovers
+    description: "Primary starts down, then recovers after the circuit reset window"
+    provider_overrides:
+      primary: 1.0
+      backup: 0.0
+    recover_after_requests: 20
+    recovered_provider_overrides:
+      primary: 0.0
+      backup: 0.0

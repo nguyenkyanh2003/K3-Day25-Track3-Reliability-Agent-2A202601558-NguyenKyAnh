@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from threading import RLock
 
 from reliability_lab.cache import ResponseCache, SharedRedisCache
 from reliability_lab.circuit_breaker import CircuitBreaker, CircuitOpenError
 from reliability_lab.providers import FakeLLMProvider, ProviderError
+from reliability_lab.redis_circuit_breaker import SharedRedisCircuitBreaker
 
 
 @dataclass(slots=True)
@@ -24,12 +27,47 @@ class ReliabilityGateway:
     def __init__(
         self,
         providers: list[FakeLLMProvider],
-        breakers: dict[str, CircuitBreaker],
+        breakers: Mapping[str, CircuitBreaker | SharedRedisCircuitBreaker],
         cache: ResponseCache | SharedRedisCache | None = None,
+        max_cost: float | None = None,
+        soft_limit_ratio: float = 0.8,
     ):
+        if max_cost is not None and max_cost <= 0:
+            raise ValueError("max_cost must be greater than zero")
+        if not 0.0 < soft_limit_ratio < 1.0:
+            raise ValueError("soft_limit_ratio must be between zero and one")
+
         self.providers = providers
-        self.breakers = breakers
+        self.breakers = dict(breakers)
         self.cache = cache
+        self.max_cost = max_cost
+        self.soft_limit_ratio = soft_limit_ratio
+        self._cumulative_cost = 0.0
+        self._budget_lock = RLock()
+
+    @property
+    def cumulative_cost(self) -> float:
+        with self._budget_lock:
+            return self._cumulative_cost
+
+    def _provider_chain(self) -> list[tuple[int, FakeLLMProvider]]:
+        indexed_providers = list(enumerate(self.providers))
+        if self.max_cost is None:
+            return indexed_providers
+
+        with self._budget_lock:
+            budget_ratio = self._cumulative_cost / self.max_cost
+        if budget_ratio >= 1.0:
+            return []
+        if budget_ratio < self.soft_limit_ratio or not indexed_providers:
+            return indexed_providers
+
+        cheapest_cost = min(provider.cost_per_1k_tokens for provider in self.providers)
+        return [
+            (index, provider)
+            for index, provider in indexed_providers
+            if provider.cost_per_1k_tokens == cheapest_cost
+        ]
 
     def complete(self, prompt: str) -> GatewayResponse:
         """Return a reliable response or a static fallback.
@@ -70,8 +108,9 @@ class ReliabilityGateway:
                     estimated_cost=0.0,
                 )
 
+        provider_chain = self._provider_chain()
         last_error: str | None = None
-        for provider_index, provider in enumerate(self.providers):
+        for provider_index, provider in provider_chain:
             breaker = self.breakers[provider.name]
             try:
                 response = breaker.call(provider.complete, prompt)
@@ -81,6 +120,8 @@ class ReliabilityGateway:
 
             if self.cache is not None:
                 self.cache.set(prompt, response.text, {"provider": provider.name})
+            with self._budget_lock:
+                self._cumulative_cost += response.estimated_cost
 
             return GatewayResponse(
                 text=response.text,
@@ -98,5 +139,9 @@ class ReliabilityGateway:
             cache_hit=False,
             latency_ms=0.0,
             estimated_cost=0.0,
-            error=last_error or "No providers configured",
+            error=last_error or (
+                "Cost budget exhausted"
+                if self.max_cost is not None and self.cumulative_cost >= self.max_cost
+                else "No providers configured"
+            ),
         )

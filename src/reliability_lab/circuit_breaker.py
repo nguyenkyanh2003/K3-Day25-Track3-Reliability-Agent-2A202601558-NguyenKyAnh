@@ -40,6 +40,7 @@ class CircuitBreaker:
     opened_at: float | None = None
     transition_log: list[dict[str, str | float]] = field(default_factory=list)
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
+    _half_open_probe_in_flight: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.failure_threshold <= 0:
@@ -62,7 +63,12 @@ class CircuitBreaker:
         Use time.monotonic() for elapsed time comparison.
         """
         with self._lock:
-            if self.state in {CircuitState.CLOSED, CircuitState.HALF_OPEN}:
+            if self.state == CircuitState.CLOSED:
+                return True
+            if self.state == CircuitState.HALF_OPEN:
+                if self._half_open_probe_in_flight:
+                    return False
+                self._half_open_probe_in_flight = True
                 return True
 
             if self.opened_at is None:
@@ -74,6 +80,7 @@ class CircuitBreaker:
 
             self.success_count = 0
             self._transition(CircuitState.HALF_OPEN, "reset_timeout_elapsed")
+            self._half_open_probe_in_flight = True
             return True
 
     def call(self, fn: Callable[..., T], *args: object, **kwargs: object) -> T:
@@ -110,6 +117,7 @@ class CircuitBreaker:
         with self._lock:
             self.failure_count = 0
             self.success_count += 1
+            self._half_open_probe_in_flight = False
 
             if (
                 self.state == CircuitState.HALF_OPEN
@@ -137,6 +145,7 @@ class CircuitBreaker:
         with self._lock:
             self.failure_count += 1
             self.success_count = 0
+            self._half_open_probe_in_flight = False
 
             if self.state == CircuitState.HALF_OPEN:
                 self.opened_at = time.monotonic()

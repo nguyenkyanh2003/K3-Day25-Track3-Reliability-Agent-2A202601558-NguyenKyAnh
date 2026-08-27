@@ -20,6 +20,7 @@ class RunMetrics(BaseModel):
     recovery_time_ms: float | None = None
     estimated_cost: float = 0.0
     estimated_cost_saved: float = 0.0
+    duration_ms: float = 0.0
     latencies_ms: list[float] = Field(default_factory=list)
     scenarios: dict[str, str] = Field(default_factory=dict)
     scenario_metrics: dict[str, dict[str, object]] = Field(default_factory=dict)
@@ -41,6 +42,11 @@ class RunMetrics(BaseModel):
         denom = self.fallback_successes + self.static_fallbacks
         return self.fallback_successes / denom if denom else 0.0
 
+    @property
+    def throughput_rps(self) -> float:
+        duration_seconds = self.duration_ms / 1000
+        return self.total_requests / duration_seconds if duration_seconds else 0.0
+
     def percentile(self, q: float) -> float:
         return percentile(self.latencies_ms, q)
 
@@ -58,6 +64,8 @@ class RunMetrics(BaseModel):
             "recovery_time_ms": self.recovery_time_ms,
             "estimated_cost": round(self.estimated_cost, 6),
             "estimated_cost_saved": round(self.estimated_cost_saved, 6),
+            "duration_ms": round(self.duration_ms, 2),
+            "throughput_rps": round(self.throughput_rps, 2),
             "scenarios": self.scenarios,
             "scenario_metrics": self.scenario_metrics,
         }
