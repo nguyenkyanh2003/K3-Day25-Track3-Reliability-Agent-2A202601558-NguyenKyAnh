@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from threading import RLock
 from typing import Any
 
+from redis.exceptions import RedisError
+
 # ---------------------------------------------------------------------------
 # Shared utilities — use these in both ResponseCache and SharedRedisCache
 # ---------------------------------------------------------------------------
@@ -135,6 +137,12 @@ class ResponseCache:
         with self._lock:
             self._entries.append(entry)
 
+    def clear(self) -> None:
+        """Remove all entries and cache audit events."""
+        with self._lock:
+            self._entries.clear()
+            self.false_hit_log.clear()
+
     @staticmethod
     def similarity(a: str, b: str) -> float:
         """Compute semantic similarity between two strings.
@@ -216,12 +224,14 @@ class SharedRedisCache:
         self.prefix = prefix
         self.false_hit_log: list[dict[str, object]] = []
         self._redis: Any = redis_lib.Redis.from_url(redis_url, decode_responses=True)
+        self._fallback = ResponseCache(ttl_seconds, similarity_threshold)
+        self._fallback.false_hit_log = self.false_hit_log
 
     def ping(self) -> bool:
         """Check Redis connectivity."""
         try:
             return bool(self._redis.ping())
-        except Exception:
+        except RedisError:
             return False
 
     def get(self, query: str) -> tuple[str | None, float]:
@@ -238,7 +248,53 @@ class SharedRedisCache:
         7. Before returning a match, check _looks_like_false_hit(); if true,
            append to self.false_hit_log and return (None, best_score)
         """
-        return None, 0.0
+        if _is_uncacheable(query):
+            return None, 0.0
+
+        exact_key = f"{self.prefix}{self._query_hash(query)}"
+        try:
+            exact_response = self._redis.hget(exact_key, "response")
+            if exact_response is not None:
+                return str(exact_response), 1.0
+
+            best_query: str | None = None
+            best_response: str | None = None
+            best_score = 0.0
+            for key in self._redis.scan_iter(f"{self.prefix}*"):
+                cached_query = self._redis.hget(key, "query")
+                if cached_query is None:
+                    continue
+                score = ResponseCache.similarity(query, str(cached_query))
+                if score > best_score:
+                    best_query = str(cached_query)
+                    cached_response = self._redis.hget(key, "response")
+                    best_response = (
+                        str(cached_response) if cached_response is not None else None
+                    )
+                    best_score = score
+        except RedisError:
+            return self._fallback.get(query)
+
+        if (
+            best_query is None
+            or best_response is None
+            or best_score < self.similarity_threshold
+        ):
+            return None, best_score
+
+        if _looks_like_false_hit(query, best_query):
+            self.false_hit_log.append(
+                {
+                    "query": query,
+                    "cached_key": best_query,
+                    "score": best_score,
+                    "reason": "date_or_number_mismatch",
+                    "ts": time.time(),
+                }
+            )
+            return None, best_score
+
+        return best_response, best_score
 
     def set(self, query: str, value: str, metadata: dict[str, str] | None = None) -> None:
         """Store a response in Redis with TTL.
@@ -249,17 +305,36 @@ class SharedRedisCache:
         3. self._redis.hset(key, mapping={"query": query, "response": value})
         4. self._redis.expire(key, self.ttl_seconds)
         """
-        pass
+        if _is_uncacheable(query):
+            return
+
+        self._fallback.set(query, value, metadata)
+        key = f"{self.prefix}{self._query_hash(query)}"
+        try:
+            with self._redis.pipeline(transaction=True) as pipeline:
+                pipeline.hset(key, mapping={"query": query, "response": value})
+                pipeline.expire(key, self.ttl_seconds)
+                pipeline.execute()
+        except RedisError:
+            # The local copy keeps the gateway useful while Redis is unavailable.
+            return
 
     def flush(self) -> None:
         """Remove all entries with this cache prefix (for testing)."""
-        for key in self._redis.scan_iter(f"{self.prefix}*"):
-            self._redis.delete(key)
+        self._fallback.clear()
+        try:
+            for key in self._redis.scan_iter(f"{self.prefix}*"):
+                self._redis.delete(key)
+        except RedisError:
+            return
 
     def close(self) -> None:
         """Close Redis connection."""
         if self._redis is not None:
-            self._redis.close()
+            try:
+                self._redis.close()
+            except RedisError:
+                return
 
     @staticmethod
     def _query_hash(query: str) -> str:
