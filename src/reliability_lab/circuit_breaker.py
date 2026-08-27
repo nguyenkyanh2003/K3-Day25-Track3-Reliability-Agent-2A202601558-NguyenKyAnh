@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, TypeVar
+from threading import RLock
+from typing import TypeVar
 
 T = TypeVar("T")
 
@@ -37,6 +39,15 @@ class CircuitBreaker:
     success_count: int = 0
     opened_at: float | None = None
     transition_log: list[dict[str, str | float]] = field(default_factory=list)
+    _lock: RLock = field(default_factory=RLock, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.failure_threshold <= 0:
+            raise ValueError("failure_threshold must be greater than zero")
+        if self.reset_timeout_seconds <= 0:
+            raise ValueError("reset_timeout_seconds must be greater than zero")
+        if self.success_threshold <= 0:
+            raise ValueError("success_threshold must be greater than zero")
 
     def allow_request(self) -> bool:
         """Return whether a request should be attempted.
@@ -50,7 +61,20 @@ class CircuitBreaker:
 
         Use time.monotonic() for elapsed time comparison.
         """
-        raise NotImplementedError("TODO: implement allow_request()")
+        with self._lock:
+            if self.state in {CircuitState.CLOSED, CircuitState.HALF_OPEN}:
+                return True
+
+            if self.opened_at is None:
+                return False
+
+            elapsed = time.monotonic() - self.opened_at
+            if elapsed < self.reset_timeout_seconds:
+                return False
+
+            self.success_count = 0
+            self._transition(CircuitState.HALF_OPEN, "reset_timeout_elapsed")
+            return True
 
     def call(self, fn: Callable[..., T], *args: object, **kwargs: object) -> T:
         """Call a function through the circuit breaker.
@@ -61,7 +85,17 @@ class CircuitBreaker:
         3. On success: call record_success() and return the result
         4. On exception: call record_failure() and re-raise
         """
-        raise NotImplementedError("TODO: implement call()")
+        if not self.allow_request():
+            raise CircuitOpenError(f"Circuit '{self.name}' is open")
+
+        try:
+            result = fn(*args, **kwargs)
+        except Exception:
+            self.record_failure()
+            raise
+
+        self.record_success()
+        return result
 
     def record_success(self) -> None:
         """Record a successful call.
@@ -73,7 +107,17 @@ class CircuitBreaker:
            - Transition to CLOSED with reason "probe_success"
            - Reset success_count to 0
         """
-        raise NotImplementedError("TODO: implement record_success()")
+        with self._lock:
+            self.failure_count = 0
+            self.success_count += 1
+
+            if (
+                self.state == CircuitState.HALF_OPEN
+                and self.success_count >= self.success_threshold
+            ):
+                self._transition(CircuitState.CLOSED, "probe_success")
+                self.success_count = 0
+                self.opened_at = None
 
     def record_failure(self) -> None:
         """Record a failed call.
@@ -90,7 +134,19 @@ class CircuitBreaker:
         IMPORTANT: HALF_OPEN and threshold cases need DIFFERENT reasons
         and must be handled separately (if/elif, not combined with or).
         """
-        raise NotImplementedError("TODO: implement record_failure()")
+        with self._lock:
+            self.failure_count += 1
+            self.success_count = 0
+
+            if self.state == CircuitState.HALF_OPEN:
+                self.opened_at = time.monotonic()
+                self._transition(CircuitState.OPEN, "probe_failure")
+            elif (
+                self.state == CircuitState.CLOSED
+                and self.failure_count >= self.failure_threshold
+            ):
+                self.opened_at = time.monotonic()
+                self._transition(CircuitState.OPEN, "failure_threshold_reached")
 
     def _transition(self, new_state: CircuitState, reason: str) -> None:
         if self.state == new_state:
